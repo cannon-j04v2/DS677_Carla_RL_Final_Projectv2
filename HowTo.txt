@@ -1,0 +1,15 @@
+cd Downloads\WindowsNoEditor
+
+activate virtual enviroment 
+
+.\.venv\Scripts\activate
+
+launch carla 
+
+CarlaUE4.exe
+
+launch traffic
+
+cd PythonAPI\Examples
+
+python generate_traffic.py
