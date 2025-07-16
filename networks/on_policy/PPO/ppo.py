@@ -12,14 +12,14 @@ class ActorCritic(nn.Module):
         super(ActorCritic, self).__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Create our variable for the matrix.
         # Note that I chose 0.2 for stdev arbitrarily.
-        self.cov_var = torch.full((self.action_dim,), action_std_init)
+        self.cov_var = torch.full((self.action_dim,), action_std_init).to(self.device)
 
         # Create the covariance matrix
-        self.cov_mat = torch.diag(self.cov_var).unsqueeze(dim=0)
+        self.cov_mat = torch.diag(self.cov_var).unsqueeze(dim=0).to(self.device)
 
         # actor
         self.actor = nn.Sequential(
@@ -48,20 +48,46 @@ class ActorCritic(nn.Module):
         raise NotImplementedError
     
     def set_action_std(self, new_action_std):
-        self.cov_var = torch.full((self.action_dim,), new_action_std)
+        self.cov_var = torch.full((self.action_dim,), new_action_std).to(self.device)
+        # Update the covariance matrix as well
+        self.cov_mat = torch.diag(self.cov_var).unsqueeze(dim=0).to(self.device)
 
 
     def get_value(self, obs):
+        # Ensure obs is a tensor and on the correct device
         if isinstance(obs, np.ndarray):
             obs = torch.tensor(obs, dtype=torch.float)
+        elif not isinstance(obs, torch.Tensor):
+            obs = torch.tensor(obs, dtype=torch.float)
+            
+        # Move to device if not already there
+        if obs.device != self.device:
+            obs = obs.to(self.device)
+            
+        # Ensure obs has the right shape (batch dimension)
+        if obs.dim() == 1:
+            obs = obs.unsqueeze(0)  # Add batch dimension
+            
         return self.critic(obs)
     
     def get_action_and_log_prob(self, obs):
         # Query the actor network for a mean action.
         # Same thing as calling self.actor.forward(obs)
         
+        # Ensure obs is a tensor and on the correct device
         if isinstance(obs, np.ndarray):
             obs = torch.tensor(obs, dtype=torch.float)
+        elif not isinstance(obs, torch.Tensor):
+            obs = torch.tensor(obs, dtype=torch.float)
+            
+        # Move to device if not already there
+        if obs.device != self.device:
+            obs = obs.to(self.device)
+            
+        # Ensure obs has the right shape (batch dimension)
+        if obs.dim() == 1:
+            obs = obs.unsqueeze(0)  # Add batch dimension
+            
         mean = self.actor(obs)
         # Create our Multivariate Normal Distribution
         dist = MultivariateNormal(mean, self.cov_mat)
@@ -78,6 +104,12 @@ class ActorCritic(nn.Module):
         return action.detach(), log_prob.detach()
     
     def evaluate(self, obs, action):
+
+        # Ensure obs and action are on the correct device
+        if obs.device != self.device:
+            obs = obs.to(self.device)
+        if action.device != self.device:
+            action = action.to(self.device)
 
         mean = self.actor(obs)
         cov_var = self.cov_var.expand_as(mean)

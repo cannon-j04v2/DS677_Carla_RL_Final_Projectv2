@@ -29,8 +29,8 @@ class PPOAgent(object):
     def __init__(self, town, action_std_init=0.4):
         
         #self.env = env
-        self.obs_dim = 100
-        self.action_dim = 2
+        self.obs_dim = 100  # 95 (latent_dim) + 5 (navigation features)
+        self.action_dim = 3  # steer, throttle, brake
         self.clip = POLICY_CLIP
         self.gamma = GAMMA
         self.n_updates_per_iteration = 7
@@ -55,11 +55,19 @@ class PPOAgent(object):
     def get_action(self, obs, train):
 
         with torch.no_grad():
+            # Ensure obs is a tensor and on the correct device
             if isinstance(obs, np.ndarray):
                 obs = torch.tensor(obs, dtype=torch.float)
-            action, logprob = self.old_policy.get_action_and_log_prob(obs.to(device))
+            elif not isinstance(obs, torch.Tensor):
+                obs = torch.tensor(obs, dtype=torch.float)
+            
+            # Move to device if not already there
+            if obs.device != device:
+                obs = obs.to(device)
+                
+            action, logprob = self.old_policy.get_action_and_log_prob(obs)
         if train:
-            self.memory.observation.append(obs.to(device))
+            self.memory.observation.append(obs)
             self.memory.actions.append(action)
             self.memory.log_probs.append(logprob)
 
@@ -80,6 +88,14 @@ class PPOAgent(object):
 
 
     def learn(self):
+        # Check if we have enough data to learn
+        if len(self.memory.rewards) == 0:
+            print("Warning: No rewards in memory, skipping learning step")
+            return
+            
+        if len(self.memory.observation) < 2:
+            print("Warning: Not enough observations in memory, skipping learning step")
+            return
 
         # Monte Carlo estimate of returns
         rewards = []
