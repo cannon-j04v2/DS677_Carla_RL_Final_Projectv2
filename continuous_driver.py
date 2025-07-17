@@ -88,11 +88,12 @@ class ClientConnection:
         return client, world
 
 class CarlaEnvironment:
-    def __init__(self, client, world, town, checkpoint_frequency=None, reward_type='simple', reward_config=None):
+    def __init__(self, client, world, town, checkpoint_frequency=None, reward_type='simple', reward_config=None, driver_view=False):
         self.client = client
         self.world = world
         self.town = town
         self.checkpoint_frequency = checkpoint_frequency
+        self.driver_view = driver_view
         
         # Set up the world
         self.world.set_weather(carla.WeatherParameters.ClearNoon)
@@ -110,6 +111,12 @@ class CarlaEnvironment:
         self.collision_sensor = None
         self.setup_camera()
         self.setup_collision_sensor()
+        
+        # Set up driver view if enabled
+        self.driver_camera = None
+        self.display = None
+        if self.driver_view:
+            self.setup_driver_view()
         
         # Episode tracking
         self.episode_step = 0
@@ -189,6 +196,54 @@ class CarlaEnvironment:
         self.collision_sensor.listen(lambda event: self._on_collision(event))
         # print("Collision sensor listening for collisions")  # Commented out
 
+    def setup_driver_view(self):
+        """Set up a driver view camera for visualization."""
+        try:
+            import pygame
+            pygame.init()
+            self.display = pygame.display.set_mode((640, 480))
+            pygame.display.set_caption("Driver View")
+            
+            # Create driver camera blueprint
+            blueprint_library = self.world.get_blueprint_library()
+            driver_camera_bp = blueprint_library.find('sensor.camera.rgb')
+            driver_camera_bp.set_attribute('image_size_x', '640')
+            driver_camera_bp.set_attribute('image_size_y', '480')
+            driver_camera_bp.set_attribute('fov', '90')
+            
+            # Attach camera to vehicle (driver position)
+            driver_camera_transform = carla.Transform(carla.Location(x=-6, z=3), carla.Rotation(pitch=-15))
+            self.driver_camera = self.world.spawn_actor(driver_camera_bp, driver_camera_transform, attach_to=self.vehicle)
+            
+            # Set up image callback for driver view
+            self.driver_image_data = {'array': None}
+            self.driver_camera.listen(lambda image: self._driver_image_callback(image))
+            
+            print("[INFO] Driver view camera attached")
+            
+        except ImportError:
+            print("[WARNING] Pygame not available. Driver view disabled.")
+            self.driver_view = False
+        except Exception as e:
+            print(f"[ERROR] Failed to setup driver view: {e}")
+            self.driver_view = False
+
+    def _driver_image_callback(self, image):
+        """Callback for driver view camera images."""
+        try:
+            import pygame
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = np.reshape(array, (image.height, image.width, 4))
+            self.driver_image_data['array'] = array[:, :, :3]
+            
+            if self.display:
+                surface = pygame.surfarray.make_surface(self.driver_image_data['array'].swapaxes(0, 1))
+                self.display.blit(surface, (0, 0))
+                pygame.display.flip()
+                
+        except Exception as e:
+            print(f"[ERROR] Driver image callback failed: {e}")
+
     def _on_collision(self, event):
         """Callback for collision events."""
         self.collision_detected = True
@@ -211,11 +266,15 @@ class CarlaEnvironment:
             self.camera.destroy()
         if self.collision_sensor:
             self.collision_sensor.destroy()
+        if self.driver_camera:
+            self.driver_camera.destroy()
             
         # Spawn new vehicle and camera
         self.spawn_vehicle()
         self.setup_camera()
         self.setup_collision_sensor()
+        if self.driver_view:
+            self.setup_driver_view()
         
         # Reset episode tracking
         self.episode_step = 0
@@ -311,6 +370,14 @@ class CarlaEnvironment:
             self.camera.destroy()
         if self.collision_sensor:
             self.collision_sensor.destroy()
+        if self.driver_camera:
+            self.driver_camera.destroy()
+        if self.display:
+            try:
+                import pygame
+                pygame.quit()
+            except:
+                pass
 
 from parameters import *
 
@@ -335,6 +402,7 @@ def runner():
     carla_host = args.carla_host
     carla_port = args.carla_port
     reward_type = args.reward_type
+    driver_view = args.driver_view
 
     ALGO_MAP = {'ppo': PPOAgent, 'dqn': DQNAgent}
     run_name = algo.upper()
@@ -412,9 +480,9 @@ def runner():
         sys.exit(1)
         
     if train:
-        env = CarlaEnvironment(client, world, town, reward_type=reward_type)
+        env = CarlaEnvironment(client, world, town, reward_type=reward_type, driver_view=driver_view)
     else:
-        env = CarlaEnvironment(client, world, town, checkpoint_frequency=None, reward_type=reward_type)
+        env = CarlaEnvironment(client, world, town, checkpoint_frequency=None, reward_type=reward_type, driver_view=driver_view)
     encode = EncodeState(LATENT_DIM)
 
     # Test environment if requested
@@ -505,6 +573,21 @@ def runner():
                     t1 = datetime.now()
 
                     for t in range(args.episode_length):
+                    
+                        # Handle pygame events for driver view
+                        if driver_view:
+                            try:
+                                import pygame
+                                for event in pygame.event.get():
+                                    if event.type == pygame.QUIT:
+                                        print("Driver view window closed. Continuing training...")
+                                        driver_view = False
+                                        env.driver_view = False
+                                        if env.display:
+                                            pygame.quit()
+                                            env.display = None
+                            except:
+                                pass
                     
                         # select action with policy
                         action_result = agent.get_action(observation, train=True)
@@ -691,6 +774,21 @@ def runner():
                 current_ep_reward = 0
                 t1 = datetime.now()
                 for t in range(args.episode_length):
+                    # Handle pygame events for driver view
+                    if driver_view:
+                        try:
+                            import pygame
+                            for event in pygame.event.get():
+                                if event.type == pygame.QUIT:
+                                    print("Driver view window closed. Continuing testing...")
+                                    driver_view = False
+                                    env.driver_view = False
+                                    if env.display:
+                                        pygame.quit()
+                                        env.display = None
+                        except:
+                            pass
+                            
                     # select action with policy
                     action_result = agent.get_action(observation, train=False)
                     

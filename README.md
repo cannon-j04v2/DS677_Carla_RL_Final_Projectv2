@@ -91,13 +91,16 @@ CARLA is an open-source simulator for autonomous driving research. It provides a
    ./dynamic_weather.py
    ```
 
+5. **Camera Position**: The 3rd person camera is positioned at (x=-6, z=3)
+   with a -15° pitch angle relative to the vehicle center
+
 ## 🎯 Running the RL Baselines
 
 ### Basic Training
 
 #### DQN Training
 ```bash
-python continuous_driver.py --algo dqn --town Town10HD_Opt --total-timesteps 1000000 --train True
+python continuous_driver.py --algo dqn --town Town10HD_Opt --total-timesteps 10000 --train True --reward-type forced_movement --seed 42 --episode-length 300
 ```
 
 #### PPO Training
@@ -155,6 +158,27 @@ python continuous_driver.py --test-env --town Town10HD_Opt
 - `--carla-host`: CARLA server host (default: localhost)
 - `--carla-port`: CARLA server port (default: 2000)
 - `--env-name`: Simulation environment name
+- `--driver-view`: Enable driver camera view during training/testing (requires pygame)
+
+### Driver View Feature
+The `--driver-view` flag enables a real-time 3rd person camera view of the agent during training or testing. This feature:
+
+- **Real-time Visualization**: Shows a 3rd person perspective of the agent's vehicle
+- **Interactive**: Close the pygame window to continue without the view
+- **Performance**: Minimal impact on training speed
+- **Requirements**: Requires pygame to be installed (`pip install pygame`)
+
+**Usage Examples:**
+```bash
+# Training with driver view
+python continuous_driver.py --algo dqn --total-timesteps 10000 --driver-view
+
+# Testing with driver view
+python continuous_driver.py --algo dqn --train False --test-timesteps 1000 --driver-view
+
+# Test the feature
+python test_driver_view.py
+```
 
 ### Training Parameters
 - `--train`: Whether to train or test (True/False)
@@ -260,6 +284,11 @@ python test_args.py
 python continuous_driver.py --test-baseline-imports
 ```
 
+### Test Driver View Feature
+```bash
+python test_driver_view.py
+```
+
 ## 🔧 Troubleshooting
 
 ### Connection Issues
@@ -276,6 +305,7 @@ python continuous_driver.py --test-baseline-imports
 - **Vehicle not visible**: Check spawn point collisions
 - **Camera issues**: Verify sensor setup
 - **Performance**: Reduce image resolution if needed
+- **Driver view not working**: Install pygame (`pip install pygame`)
 
 ### Reward Function Issues
 - **Waypoint errors**: Ensure CARLA world is properly loaded

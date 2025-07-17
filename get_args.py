@@ -70,6 +70,8 @@ def parse_args():
                        help='CARLA server host (default: localhost)')
     parser.add_argument('--carla-port', type=int, default=2000, 
                        help='CARLA server port (default: 2000)')
+    parser.add_argument('--driver-view', action='store_true', 
+                       help='Enable driver camera view during training (requires pygame)')
     
     # Reward function parameters
     parser.add_argument('--reward-type', type=str, default='simple', 
