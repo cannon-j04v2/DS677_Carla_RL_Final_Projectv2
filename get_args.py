@@ -42,8 +42,8 @@ def parse_args():
     
     # Algorithm and training parameters
     parser.add_argument('--algo', '--exp-name', type=str, default='ppo', 
-                       choices=['ppo', 'dqn'], 
-                       help='RL algorithm to use (ppo or dqn)')
+                       choices=['ppo', 'dqn', 'dqn_finaltest'], 
+                       help='RL algorithm to use (ppo, dqn, or dqn_finaltest)')
     parser.add_argument('--env-name', type=str, default='carla', 
                        help='name of the simulation environment')
     parser.add_argument('--learning-rate', type=float, default=PPO_LEARNING_RATE, 
@@ -63,6 +63,25 @@ def parse_args():
     parser.add_argument('--load-checkpoint', type=bool, default=MODEL_LOAD, 
                        help='resume training?')
     
+    # DQN-specific parameters
+    parser.add_argument('--target-update-method', type=str, default='hard', 
+                       choices=['hard', 'soft'],
+                       help='Target network update method: hard (periodic copy) or soft (gradual update)')
+    parser.add_argument('--soft-update-tau', type=float, default=0.005,
+                       help='Tau parameter for soft target network updates (only used with --target-update-method soft)')
+    parser.add_argument('--double-dqn', action='store_true',
+                       help='Enable Double-DQN (use online net for action selection, target net for evaluation)')
+    parser.add_argument('--early-stop', action='store_true',
+                        help='Enable simple early stopping based on recent average reward drop')
+    parser.add_argument('--early-stop-patience', type=int, default=20,
+                        help='Number of episodes to monitor before early stop')
+    parser.add_argument('--early-stop-tolerance', type=float, default=20.0,
+                        help='Allowed drop in average reward before stopping')
+    parser.add_argument('--learn-starts', type=int, default=2000,
+                        help='Number of steps before starting learning updates')
+    parser.add_argument('--learn-freq', type=int, default=8,
+                        help='Frequency (in steps) between learning updates')
+    
     # Environment parameters
     parser.add_argument('--town', type=str, default="Town10HD_Opt", 
                        help='which town do you like?')
@@ -80,6 +99,8 @@ def parse_args():
                        help='List available reward functions and exit')
     
     # Testing and debugging parameters
+    parser.add_argument('--random-test', action='store_true', 
+                       help='During evaluation, take random actions instead of the trained policy')
     parser.add_argument('--test-env', action='store_true', 
                        help='Test environment setup only')
     
@@ -107,8 +128,8 @@ def validate_args(args):
         ValueError: If arguments are invalid
     """
     # Validate algorithm choice
-    if args.algo not in ['ppo', 'dqn']:
-        raise ValueError(f"Algorithm '{args.algo}' not supported. Choose from: ppo, dqn")
+    if args.algo not in ['ppo', 'dqn', 'dqn_finaltest']:
+        raise ValueError(f"Algorithm '{args.algo}' not supported. Choose from: ppo, dqn, dqn_finaltest")
     
     # Validate timesteps
     if args.total_timesteps <= 0:
@@ -135,6 +156,13 @@ def validate_args(args):
     # Validate seed
     if args.seed < 0:
         raise ValueError("Seed must be non-negative")
+    
+    # Validate DQN-specific parameters
+    if args.target_update_method not in ['hard', 'soft']:
+        raise ValueError("Target update method must be 'hard' or 'soft'")
+    
+    if args.soft_update_tau <= 0 or args.soft_update_tau >= 1:
+        raise ValueError("Soft update tau must be between 0 and 1 (exclusive)")
 
 
 def get_args():

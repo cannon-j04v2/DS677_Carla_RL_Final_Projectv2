@@ -1,6 +1,7 @@
 import sys
 import torch
 from autoencoder.encoder import VariationalEncoder
+import numpy as np
 
 class EncodeState():
     def __init__(self, latent_dim):
@@ -20,15 +21,19 @@ class EncodeState():
             self.conv_encoder = None
     
     def process(self, observation):
-        if self.conv_encoder is None:
-            # Return placeholder observation for testing
-            return torch.zeros(self.latent_dim + len(observation[1]) if len(observation) > 1 else self.latent_dim)
-        
-        image_obs = torch.tensor(observation[0], dtype=torch.float).to(self.device)
-        image_obs = image_obs.unsqueeze(0)
-        image_obs = image_obs.permute(0,3,2,1)
-        image_obs = self.conv_encoder(image_obs)
-        navigation_obs = torch.tensor(observation[1], dtype=torch.float).to(self.device)
-        observation = torch.cat((image_obs.view(-1), navigation_obs), -1)
-        
-        return observation
+        if self.conv_encoder is not None:
+            image_obs = torch.from_numpy(observation[0].copy()).float().to(self.device)
+            image_obs = image_obs.permute(2, 0, 1).unsqueeze(0)
+            
+            with torch.no_grad():
+                latent_vec = self.conv_encoder(image_obs).squeeze().cpu().numpy()
+            
+            nav_obs = observation[1]
+            processed_observation = np.concatenate([latent_vec, nav_obs])
+        else:
+            # If the encoder model is not loaded, create a zero vector for the latent space
+            latent_vec = np.zeros(self.latent_dim)
+            nav_obs = observation[1]
+            processed_observation = np.concatenate([latent_vec, nav_obs])
+            
+        return processed_observation

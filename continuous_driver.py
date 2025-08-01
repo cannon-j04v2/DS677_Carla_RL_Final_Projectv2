@@ -38,6 +38,7 @@ import carla
 from encoder_init import EncodeState
 from networks.on_policy.PPO.agent import PPOAgent
 from networks.off_policy.DQN.agent import DQNAgent
+from networks.off_policy.DQN_FINALTEST.agent import DQNAgent as DQNAgentFinalTest
 from rewards import RewardFactory
 from get_args import get_args
 
@@ -59,6 +60,13 @@ class ClientConnection:
         world = client.get_world()
         print("Successfully connected to CARLA server!")
         
+        # Set to synchronous mode with a fixed time step for stability
+        settings = world.get_settings()
+        # settings.synchronous_mode = True
+        # settings.fixed_delta_seconds = 0.05  # 20 FPS
+        world.apply_settings(settings)
+        # print("Enabled synchronous mode with a fixed time step of 0.05s.")
+
         # Check if we need to load the town
         current_map = world.get_map()
         print(f"Current map: {current_map.name}")
@@ -106,11 +114,13 @@ class CarlaEnvironment:
         self.vehicle = None
         self.spawn_vehicle()
         
-        # Set up sensors (camera for observation)
+        # Set up sensors
         self.camera = None
         self.collision_sensor = None
-        self.setup_camera()
-        self.setup_collision_sensor()
+        self.lane_invasion_sensor = None
+        self.imu_sensor = None
+        self.lidar_sensor = None
+        self.setup_sensors()
         
         # Set up driver view if enabled
         self.driver_camera = None
@@ -121,6 +131,8 @@ class CarlaEnvironment:
         # Episode tracking
         self.episode_step = 0
         self.collision_detected = False
+        self.lane_invasion_detected = False
+        self.num_collisions_this_episode = 0
         
         # Set up reward function
         self.reward_function = RewardFactory.create_reward(reward_type, reward_config)
@@ -153,6 +165,14 @@ class CarlaEnvironment:
         self.last_location = self.vehicle.get_location()
         # print(f"Vehicle location: {self.last_location}")  # Commented out
         
+    def setup_sensors(self):
+        """Set up all sensors for the vehicle."""
+        self.setup_camera()
+        self.setup_collision_sensor()
+        self.setup_lane_invasion_sensor()
+        self.setup_imu_sensor()
+        self.setup_lidar_sensor()
+
     def setup_camera(self):
         """Set up a camera sensor for observation."""
         blueprint_library = self.world.get_blueprint_library()
@@ -195,6 +215,44 @@ class CarlaEnvironment:
         self.collision_detected = False
         self.collision_sensor.listen(lambda event: self._on_collision(event))
         # print("Collision sensor listening for collisions")  # Commented out
+
+    def setup_lane_invasion_sensor(self):
+        """Set up a lane invasion sensor."""
+        blueprint_library = self.world.get_blueprint_library()
+        lane_invasion_bp = blueprint_library.find('sensor.other.lane_invasion')
+        self.lane_invasion_sensor = self.world.spawn_actor(lane_invasion_bp, carla.Transform(), attach_to=self.vehicle)
+        self.lane_invasion_detected = False
+        self.lane_invasion_sensor.listen(lambda event: self._on_lane_invasion(event))
+
+    def setup_imu_sensor(self):
+        """Set up an IMU sensor."""
+        blueprint_library = self.world.get_blueprint_library()
+        imu_bp = blueprint_library.find('sensor.other.imu')
+        self.imu_sensor = self.world.spawn_actor(imu_bp, carla.Transform(), attach_to=self.vehicle)
+        self.imu_data = {'accelerometer': carla.Vector3D(), 'gyroscope': carla.Vector3D()}
+        self.imu_sensor.listen(lambda data: self._on_imu_update(data))
+
+    def setup_lidar_sensor(self):
+        """Set up a LiDAR sensor for obstacle detection."""
+        blueprint_library = self.world.get_blueprint_library()
+        lidar_bp = blueprint_library.find('sensor.lidar.ray_cast')
+        lidar_bp.set_attribute('range', '50')
+        lidar_bp.set_attribute('channels', '32')
+        lidar_bp.set_attribute('points_per_second', '112000')
+        lidar_bp.set_attribute('rotation_frequency', '20')
+        lidar_bp.set_attribute('upper_fov', '10')
+        lidar_bp.set_attribute('lower_fov', '-30')
+        
+        lidar_transform = carla.Transform(carla.Location(x=0, z=2.4))
+        try:
+            self.lidar_sensor = self.world.spawn_actor(lidar_bp, lidar_transform, attach_to=self.vehicle)
+        except Exception as e:
+            print(f"ERROR: Failed to spawn LiDAR sensor: {e}")
+            self.lidar_sensor = None
+            return
+
+        self.lidar_queue = queue.Queue()
+        self.lidar_sensor.listen(self.lidar_queue.put)
 
     def setup_driver_view(self):
         """Set up a driver view camera for visualization."""
@@ -247,6 +305,7 @@ class CarlaEnvironment:
     def _on_collision(self, event):
         """Callback for collision events."""
         self.collision_detected = True
+        self.num_collisions_this_episode += 1
         try:
             actor_name = event.other_actor.name if hasattr(event.other_actor, 'name') else 'Unknown'
             print("\n###### COLLISION OCCURRED #######")
@@ -257,28 +316,83 @@ class CarlaEnvironment:
             print(f"Actor: {event.other_actor.type_id}, Error getting name: {e}")
             print("##################################\n")
 
+    def _on_lane_invasion(self, event):
+        """Callback for lane invasion events."""
+        self.lane_invasion_detected = True
+
+    def _on_imu_update(self, data):
+        """Callback for IMU updates."""
+        self.imu_data['accelerometer'] = data.accelerometer
+        self.imu_data['gyroscope'] = data.gyroscope
+
+    def _process_lidar(self, raw_lidar_data):
+        """Process LiDAR point cloud into a fixed-size representation."""
+        points = np.frombuffer(raw_lidar_data.raw_data, dtype=np.dtype('f4'))
+        points = np.reshape(points, (int(points.shape[0] / 4), 4))
+        
+        # Get x, y, z coordinates
+        lidar_points = points[:, :3]
+        
+        # 8 sectors, 45 degrees each
+        num_sectors = 8
+        sectors = [[] for _ in range(num_sectors)]
+        
+        for point in lidar_points:
+            x, y, z = point
+            if x == 0 and y == 0:
+                continue
+
+            # Get angle and distance
+            angle = np.degrees(np.arctan2(y, x))
+            if angle < 0:
+                angle += 360
+            
+            dist = np.sqrt(x**2 + y**2)
+
+            # Assign to sector
+            sector_index = int(angle // (360 / num_sectors))
+            if 0 <= sector_index < num_sectors:
+                sectors[sector_index].append(dist)
+
+        # Get minimum distance in each sector
+        min_dists = []
+        for sector_dists in sectors:
+            if sector_dists:
+                min_dists.append(min(sector_dists))
+            else:
+                min_dists.append(50) # Max range
+        
+        return np.array(min_dists) / 50.0 # Normalize
+
     def reset(self):
         """Reset the environment for a new episode."""
-        # Destroy current vehicle and camera
+        # Destroy current vehicle and sensors
         if self.vehicle:
             self.vehicle.destroy()
         if self.camera:
             self.camera.destroy()
         if self.collision_sensor:
             self.collision_sensor.destroy()
+        if self.lane_invasion_sensor:
+            self.lane_invasion_sensor.destroy()
+        if self.imu_sensor:
+            self.imu_sensor.destroy()
+        if self.lidar_sensor:
+            self.lidar_sensor.destroy()
         if self.driver_camera:
             self.driver_camera.destroy()
             
-        # Spawn new vehicle and camera
+        # Spawn new vehicle and sensors
         self.spawn_vehicle()
-        self.setup_camera()
-        self.setup_collision_sensor()
+        self.setup_sensors()
         if self.driver_view:
             self.setup_driver_view()
         
         # Reset episode tracking
         self.episode_step = 0
         self.collision_detected = False
+        self.lane_invasion_detected = False
+        self.num_collisions_this_episode = 0
         
         # Reset reward function
         self.reward_function.reset()
@@ -301,23 +415,50 @@ class CarlaEnvironment:
             # If no image available, return zeros
             array = np.zeros((80, 160, 3))
             # print("Warning: No camera image received, using zeros")  # Commented out
-            
+        
+        # Get LiDAR data
+        try:
+            lidar_data = self.lidar_queue.get(timeout=1.0)
+            lidar_features = self._process_lidar(lidar_data)
+        except queue.Empty:
+            lidar_features = np.zeros(8)
+        
+        # Get traffic light state
+        traffic_light_state = [0, 0, 0, 0] # [None, Green, Yellow, Red]
+        if self.vehicle.is_at_traffic_light():
+            light = self.vehicle.get_traffic_light()
+            if light is not None:
+                if light.state == carla.TrafficLightState.Green:
+                    traffic_light_state = [0, 1, 0, 0]
+                elif light.state == carla.TrafficLightState.Yellow:
+                    traffic_light_state = [0, 0, 1, 0]
+                elif light.state == carla.TrafficLightState.Red:
+                    traffic_light_state = [0, 0, 0, 1]
+        else:
+            traffic_light_state = [1, 0, 0, 0]
+
         # Get vehicle state for navigation info
         vehicle_location = self.vehicle.get_location()
         vehicle_transform = self.vehicle.get_transform()
         vehicle_rotation = vehicle_transform.rotation
         vehicle_velocity = self.vehicle.get_velocity()
         
-        # Create navigation observation (simplified)
+        # Create navigation observation with additional IMU data
         nav_obs = np.array([
-            vehicle_location.x / 1000.0,  # Normalize coordinates
+            vehicle_location.x / 1000.0,
             vehicle_location.y / 1000.0,
-            vehicle_rotation.yaw / 360.0,  # Normalize angle
-            vehicle_velocity.x / 20.0,     # Normalize velocity
-            vehicle_velocity.y / 20.0
+            vehicle_rotation.yaw / 360.0,
+            vehicle_velocity.x / 20.0,
+            vehicle_velocity.y / 20.0,
+            self.imu_data['accelerometer'].x / 10.0,
+            self.imu_data['accelerometer'].y / 10.0,
+            self.imu_data['gyroscope'].z / 10.0
         ])
         
-        return [array, nav_obs]
+        # Combine all navigation and sensor features
+        combined_nav = np.concatenate([nav_obs, lidar_features, np.array(traffic_light_state)])
+
+        return [array, combined_nav]
         
     def step(self, action):
         """Execute action and return new state, reward, done, info."""
@@ -357,8 +498,11 @@ class CarlaEnvironment:
             vehicle=self.vehicle,
             episode_step=self.episode_step,
             collision_detected=self.collision_detected,
+            lane_invasion_detected=self.lane_invasion_detected,
             world=self.world  # Pass world reference for waypoint access
         )
+        
+        info['num_collisions'] = self.num_collisions_this_episode
         
         return reward, done, info
         
@@ -370,8 +514,14 @@ class CarlaEnvironment:
             self.camera.destroy()
         if self.collision_sensor:
             self.collision_sensor.destroy()
+        if self.lidar_sensor:
+            self.lidar_sensor.destroy()
         if self.driver_camera:
             self.driver_camera.destroy()
+        if self.lane_invasion_sensor:
+            self.lane_invasion_sensor.destroy()
+        if self.imu_sensor:
+            self.imu_sensor.destroy()
         if self.display:
             try:
                 import pygame
@@ -382,8 +532,23 @@ class CarlaEnvironment:
 from parameters import *
 
 
+def print_summary_statistics(run_mode, timestep, total_collisions, total_speed_for_stats, total_distance_for_stats):
+    """Prints a formatted summary of the run."""
+    print(f"\n========== {run_mode.upper()} SUMMARY STATISTICS ==========")
+    if timestep > 0:
+        collision_rate_pct = (total_collisions / timestep) * 100
+        avg_speed = total_speed_for_stats / timestep
+        print(f"  - Collision Rate: {collision_rate_pct:.2f}% (collisions per 100 timesteps)")
+        print(f"  - Average Speed: {avg_speed:.2f} m/s")
+    else:
+        print("  - No timesteps were run.")
 
-
+    if total_collisions > 0:
+        avg_dist_per_collision = total_distance_for_stats / total_collisions
+        print(f"  - Average Distance per Collision: {avg_dist_per_collision:.2f} m")
+    else:
+        print("  - No collisions occurred.")
+    print("===================================================\n")
 
 
 def runner():
@@ -404,7 +569,7 @@ def runner():
     reward_type = args.reward_type
     driver_view = args.driver_view
 
-    ALGO_MAP = {'ppo': PPOAgent, 'dqn': DQNAgent}
+    ALGO_MAP = {'ppo': PPOAgent, 'dqn': DQNAgent, 'dqn_finaltest': DQNAgentFinalTest}
     run_name = algo.upper()
 
     if train == True:
@@ -443,20 +608,39 @@ def runner():
     scores = list()
     deviation_from_center = 0
     distance_covered = 0
-    
+    total_collisions = 0
+    total_distance_for_stats = 0
+    total_speed_for_stats = 0
+    losses = []
+    best_avg_reward = -np.inf
+    degrade_counter = 0
+
+    # define variables after reading args
+    learn_starts = args.learn_starts
+    learn_freq = args.learn_freq
+
     # Set up real-time plotting
     plt.ion()  # Turn on interactive mode
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.set_xlabel('Total Timesteps')
-    ax.set_ylabel('Cumulative Reward')
-    ax.set_title(f'Training Progress - {algo.upper()} with {reward_type} reward\nTown: {town}, LR: {args.learning_rate}, Std: {action_std_init}, Seed: {args.seed}')
-    ax.grid(True, alpha=0.3)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
+    
+    # Top plot for rewards
+    ax1.set_ylabel('Cumulative Reward')
+    ax1.set_title(f'Training Progress - {algo.upper()} with {reward_type} reward\nTown: {town}, LR: {args.learning_rate}, Std: {action_std_init}, Seed: {args.seed}')
+    ax1.grid(True, alpha=0.3)
+    
+    # Bottom plot for MSE loss
+    ax2.set_xlabel('Total Timesteps')
+    ax2.set_ylabel('MSE Loss')
+    ax2.grid(True, alpha=0.3)
     
     # Data for plotting
     plot_timesteps = []
     plot_rewards = []
-    line, = ax.plot([], [], 'b-', linewidth=2, label='Cumulative Reward')
-    ax.legend()
+    plot_losses = []
+    reward_line, = ax1.plot([], [], 'b-', linewidth=2, label='Cumulative Reward')
+    loss_line, = ax2.plot([], [], 'r-', linewidth=2, label='MSE Loss')
+    ax1.legend()
+    ax2.legend()
     
     # Create plots directory if it doesn't exist
     plots_dir = os.path.join(os.getcwd(), 'plots')
@@ -486,6 +670,10 @@ def runner():
     encode = EncodeState(LATENT_DIM)
 
     # Test environment if requested
+    # Adjust test timesteps if user did not specify and provided total_timesteps
+    if not train and (args.test_timesteps == TEST_TIMESTEPS):
+        args.test_timesteps = total_timesteps
+
     if args.test_env:
         print("Testing environment setup...")
         try:
@@ -531,17 +719,48 @@ def runner():
                 agent.load()
             elif algo == 'dqn':
                 # DQN checkpoint loading logic
-                agent = AgentClass(town)
+                agent = AgentClass(town, use_double_dqn=args.double_dqn,
+                                  target_update_method=args.target_update_method,
+                                  soft_update_tau=args.soft_update_tau)
+                agent.load()  # Load latest checkpoint if available
+            elif algo == 'dqn_finaltest':
+                # DQN_FINALTEST checkpoint loading logic with custom parameters
+                agent = AgentClass(town, 
+                                   target_update_method=args.target_update_method,
+                                   soft_update_tau=args.soft_update_tau,
+                                   use_double_dqn=args.double_dqn)
                 agent.load()  # Load latest checkpoint if available
         else:
             if train == False:
-                agent = AgentClass(town, action_std_init) if algo == 'ppo' else AgentClass(town)
+                if algo == 'ppo':
+                    agent = AgentClass(town, action_std_init)
+                elif algo == 'dqn':
+                    agent = AgentClass(town, use_double_dqn=args.double_dqn,
+                                      target_update_method=args.target_update_method,
+                                      soft_update_tau=args.soft_update_tau)
+                elif algo == 'dqn_finaltest':
+                    agent = AgentClass(town, 
+                                       target_update_method=args.target_update_method,
+                                       soft_update_tau=args.soft_update_tau,
+                                       use_double_dqn=args.double_dqn)
                 agent.load()
+                if args.random_test and (algo == 'dqn' or algo == 'dqn_finaltest'):
+                    agent.epsilon = 1.0  # force random actions during evaluation
                 if algo == 'ppo':
                     for params in agent.old_policy.actor.parameters():
                         params.requires_grad = False
             else:
-                agent = AgentClass(town, action_std_init) if algo == 'ppo' else AgentClass(town)
+                if algo == 'ppo':
+                    agent = AgentClass(town, action_std_init)
+                elif algo == 'dqn':
+                    agent = AgentClass(town, use_double_dqn=args.double_dqn,
+                                      target_update_method=args.target_update_method,
+                                      soft_update_tau=args.soft_update_tau)
+                elif algo == 'dqn_finaltest':
+                    agent = AgentClass(town, 
+                                       target_update_method=args.target_update_method,
+                                       soft_update_tau=args.soft_update_tau,
+                                       use_double_dqn=args.double_dqn)
         
         # Print algorithm startup information
         print(f"\n{'='*60}")
@@ -558,6 +777,17 @@ def runner():
             print(f"Initial Epsilon: {agent.epsilon}")
             print(f"Learning Rate: {agent.lr}")
             print(f"Buffer Size: {agent.memory.capacity}")
+        elif algo == 'dqn_finaltest':
+            print(f"Initial Epsilon: {agent.epsilon}")
+            print(f"Learning Rate: {agent.lr}")
+            print(f"Buffer Size: {agent.memory.capacity}")
+            print(f"Network Hidden Layers: {agent.num_hidden}")
+            print(f"Hidden Layer Dimension: {agent.hidden_dim}")
+            print(f"Target Update Method: {agent.target_update_method}")
+            if agent.target_update_method == 'soft':
+                print(f"Soft Update Tau: {agent.soft_update_tau}")
+            else:
+                print(f"Hard Update Frequency: {agent.target_update_freq}")
         print(f"{'='*60}\n")
         
         if train:
@@ -593,12 +823,13 @@ def runner():
                         action_result = agent.get_action(observation, train=True)
                         
                         # Handle different action formats
-                        if algo == 'dqn':
+                        if algo == 'dqn' or algo == 'dqn_finaltest':
                             action, action_idx = action_result
                         else:
                             action = action_result
 
                         observation, reward, done, info = env.step(action)
+                        total_speed_for_stats += info.get('speed', 0)
                         if observation is None:
                             break
                         observation = encode.process(observation)
@@ -607,12 +838,14 @@ def runner():
                         if algo == 'ppo':
                             agent.memory.rewards.append(reward)
                             agent.memory.dones.append(done)
-                        elif algo == 'dqn':
+                        elif algo == 'dqn' or algo == 'dqn_finaltest':
                             # Store experience in replay buffer
                             agent.memory.add(observation, action_idx, reward, observation, done)
                             # Perform learning step every few steps
-                            if timestep % 4 == 0:  # Learn every 4 steps
-                                agent.learn()
+                            if timestep >= learn_starts and timestep % learn_freq == 0:
+                                loss = agent.learn()
+                                if loss:
+                                    losses.append(loss)
                         
                         timestep +=1
                         current_ep_reward += reward
@@ -638,6 +871,9 @@ def runner():
                     # Increment episode counter after the loop (unconditional)
                     episode += 1
                     
+                    total_collisions += info.get('num_collisions', 0)
+                    total_distance_for_stats += info.get('distance', 0)
+
                     deviation_from_center += info.get('deviation_from_center', 0)
                     distance_covered += info.get('distance', 0)
                     
@@ -647,6 +883,18 @@ def runner():
                         cumulative_score = ((cumulative_score * (episode - 1)) + current_ep_reward) / (episode)
                     else:
                         cumulative_score = np.mean(scores)
+
+                    # Early stopping check
+                    if args.early_stop and episode >= args.early_stop_patience:
+                        if cumulative_score > best_avg_reward + 1e-3:
+                            best_avg_reward = cumulative_score
+                            degrade_counter = 0
+                        elif cumulative_score < best_avg_reward - args.early_stop_tolerance:
+                            degrade_counter += 1
+                            if degrade_counter >= args.early_stop_patience:
+                                print("Early stopping triggered: performance degraded. Saving model and stopping.")
+                                agent.save()
+                                break
 
                     # Print episode analytics summary
                     print("\n========== EPISODE SUMMARY ==========")
@@ -669,12 +917,20 @@ def runner():
                     plot_rewards.append(np.sum(scores))
                     
                     # Update the plot data
-                    line.set_data(plot_timesteps, plot_rewards)
+                    reward_line.set_data(plot_timesteps, plot_rewards)
                     
+                    # Update loss plot if there is data
+                    if len(losses) > 0:
+                        loss_timesteps = np.linspace(0, timestep, len(losses))
+                        plot_losses = losses
+                        loss_line.set_data(loss_timesteps, plot_losses)
+                        ax2.set_xlim(0, max(plot_timesteps))
+                        ax2.set_ylim(0, max(plot_losses) * 1.1)
+
                     # Adjust plot limits
                     if len(plot_timesteps) > 1:
-                        ax.set_xlim(0, max(plot_timesteps))
-                        ax.set_ylim(min(plot_rewards) * 0.9, max(plot_rewards) * 1.1)
+                        ax1.set_xlim(0, max(plot_timesteps))
+                        ax1.set_ylim(min(plot_rewards) * 0.9 if min(plot_rewards) < 0 else 0, max(plot_rewards) * 1.1)
                     
                     # Redraw the plot
                     fig.canvas.draw()
@@ -692,7 +948,7 @@ def runner():
                         if algo == 'ppo':
                             # print(f"PPO Debug - Action Std: {agent.action_std:.3f}, Memory Size: {len(agent.memory.rewards)}") # Commented out
                             pass # Removed debug print
-                        elif algo == 'dqn':
+                        elif algo == 'dqn' or algo == 'dqn_finaltest':
                             # print(f"DQN Debug - Epsilon: {agent.epsilon:.3f}, Buffer Size: {len(agent.memory)}") # Commented out
                             pass # Removed debug print
                     
@@ -707,7 +963,7 @@ def runner():
                             data_obj = {'cumulative_score': cumulative_score, 'episode': episode, 'timestep': timestep, 'action_std_init': action_std_init}
                             with open(chkpt_file, 'wb') as handle:
                                 pickle.dump(data_obj, handle)
-                        elif algo == 'dqn':
+                        elif algo == 'dqn' or algo == 'dqn_finaltest':
                             agent.save()
                     
                     if episode > 0 and episode % 5 == 0:
@@ -725,9 +981,12 @@ def runner():
                         writer.add_scalar("Average Deviation from Center/(t)", deviation_from_center/n_recent, timestep)
                         writer.add_scalar("Average Distance Covered (m)/episode", distance_covered/n_recent, episode)
                         writer.add_scalar("Average Distance Covered (m)/(t)", distance_covered/n_recent, timestep)
+                        if len(losses) > 0:
+                            writer.add_scalar("Loss/episode", np.mean(losses[-n_recent*10:]), episode) # Approx
+                            writer.add_scalar("Loss/(t)", np.mean(losses[-n_recent*10:]), timestep)
                         
                         # DQN-specific logging
-                        if algo == 'dqn':
+                        if algo == 'dqn' or algo == 'dqn_finaltest':
                             writer.add_scalar("DQN/Epsilon", agent.epsilon, episode)
                         # PPO-specific logging
                         elif algo == 'ppo':
@@ -750,7 +1009,7 @@ def runner():
                             data_obj = {'cumulative_score': cumulative_score, 'episode': episode, 'timestep': timestep, 'action_std_init': action_std_init}
                             with open(chkpt_file, 'wb') as handle:
                                 pickle.dump(data_obj, handle)
-                        elif algo == 'dqn':
+                        elif algo == 'dqn' or algo == 'dqn_finaltest':
                             agent.save()
                         
             print("Terminating the run.")
@@ -759,6 +1018,24 @@ def runner():
             final_plot_filename = os.path.join(plots_dir, f'{algo.upper()}_{reward_type}_FINAL_ep{episode}_ts{timestep}_lr{args.learning_rate}_std{action_std_init}_seed{args.seed}.png')
             fig.savefig(final_plot_filename, dpi=150, bbox_inches='tight')
             print(f"Final plot saved: {final_plot_filename}")
+
+            print("\n========== TRAINING SUMMARY STATISTICS ==========")
+            if timestep > 0:
+                collision_rate = total_collisions / timestep
+                avg_speed = total_speed_for_stats / timestep
+                print(f"Collision Rate: {collision_rate:.4f} (collisions/timestep)")
+                print(f"Average Speed: {avg_speed:.2f} m/s")
+            else:
+                print("No timesteps were run.")
+
+            if total_collisions > 0:
+                avg_dist_per_collision = total_distance_for_stats / total_collisions
+                print(f"Average Distance per Collision: {avg_dist_per_collision:.2f} m")
+            else:
+                print("No collisions occurred.")
+            if len(losses)>0:
+                print(f"Average Loss: {np.mean(losses):.4f}")
+            print("==============================================\n")
             
             # Close the plot
             plt.close(fig)
@@ -793,12 +1070,13 @@ def runner():
                     action_result = agent.get_action(observation, train=False)
                     
                     # Handle different action formats
-                    if algo == 'dqn':
+                    if algo == 'dqn' or algo == 'dqn_finaltest':
                         action, _ = action_result
                     else:
                         action = action_result
                         
                     observation, reward, done, info = env.step(action)
+                    total_speed_for_stats += info.get('speed', 0)
                     if observation is None:
                         break
                     observation = encode.process(observation)
@@ -814,6 +1092,8 @@ def runner():
                         break
                 # Increment episode counter after the loop (unconditional)
                 episode += 1
+                total_collisions += info.get('num_collisions', 0)
+                total_distance_for_stats += info.get('distance', 0)
                 deviation_from_center += info.get('deviation_from_center', 0)
                 distance_covered += info.get('distance', 0)
                 
@@ -837,6 +1117,20 @@ def runner():
                 distance_covered = 0
 
             print("Terminating the run.")
+
+            # Save final plot (only during training)
+            if train:
+                final_plot_filename = os.path.join(plots_dir, f'{algo.upper()}_{reward_type}_FINAL_ep{episode}_ts{timestep}_lr{args.learning_rate}_std{action_std_init}_seed{args.seed}.png')
+                fig.savefig(final_plot_filename, dpi=150, bbox_inches='tight')
+                print(f"Final plot saved: {final_plot_filename}")
+            
+            # Close the plot
+            plt.close(fig)
+
+            # Print summary statistics
+            run_mode = "training" if train else "testing"
+            print_summary_statistics(run_mode, timestep, total_collisions, total_speed_for_stats, total_distance_for_stats)
+
             env.cleanup()
             sys.exit()
 
@@ -851,8 +1145,9 @@ if __name__ == "__main__":
     if '--test-baseline-imports' in sys.argv:
         from networks.common.base_agent import BaseAgent
         from networks.off_policy.DQN.agent import DQNAgent
+        from networks.off_policy.DQN_FINALTEST.agent import DQNAgent as DQNAgentFinalTest
         from networks.on_policy.PPO.agent import PPOAgent
-        print("BaseAgent, DQNAgent, PPOAgent import and instantiate test...")
+        print("BaseAgent, DQNAgent, DQNAgentFinalTest, PPOAgent import and instantiate test...")
         try:
             class DummyAgent(BaseAgent):
                 def get_action(self, state, train): return 0
@@ -861,6 +1156,7 @@ if __name__ == "__main__":
                 def load(self, path): pass
             dummy = DummyAgent()
             dqn = DQNAgent('TestTown')
+            dqn_finaltest = DQNAgentFinalTest('TestTown')
             ppo = PPOAgent('TestTown')
             print("SUCCESS: All agents imported and instantiated.")
         except Exception as e:
