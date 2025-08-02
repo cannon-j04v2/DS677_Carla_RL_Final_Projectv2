@@ -9,21 +9,20 @@ CARLA is an open-source simulator for autonomous driving research. It provides a
 **Website**: [carla.org](http://carla.org/)  
 **Documentation**: [carla.readthedocs.io](http://carla.readthedocs.io)
 
-## ✅ Project Status
+## 🎯 Features
 
-**FULLY IMPLEMENTED AND TESTED** ✅
-- ✅ CARLA 0.9.15 simulator integration
-- ✅ Modular reward system with multiple reward functions
-- ✅ PPO (Proximal Policy Optimization) with continuous action space
-- ✅ DQN (Deep Q-Network) with discrete action space
-- ✅ Real CARLA environment integration with sensors
-- ✅ Experience replay and target networks
-- ✅ ε-greedy exploration
-- ✅ Checkpoint saving/loading
-- ✅ TensorBoard logging
-- ✅ Multi-town support
-- ✅ Argument parser with validation
-- ✅ Comprehensive testing suite
+- 🚗 CARLA 0.9.15 simulator integration
+- 🧠 Modular reward system with multiple reward functions
+- 📈 PPO (Proximal Policy Optimization) with continuous action space
+- 🎮 Enhanced DQN with Double DQN, soft target updates, and early stopping
+- 🌍 Real CARLA environment integration with sensors
+- 🔄 Experience replay and target networks
+- 🎲 ε-greedy exploration with configurable parameters
+- 💾 Checkpoint saving/loading system
+- 📊 TensorBoard logging and monitoring
+- 🗺️ Multi-town support
+- ⚙️ Comprehensive argument parser with validation
+- 🧪 Extensive testing suite
 
 ## 🏗️ Project Structure
 
@@ -45,7 +44,8 @@ CARLA is an open-source simulator for autonomous driving research. It provides a
 │   ├── on_policy/
 │   │   └── PPO/
 │   └── off_policy/
-│       └── DQN/
+│       ├── DQN/
+│       └── DQN_FINALTEST/      # Enhanced DQN with advanced features
 ├── test_rewards.py        # Test rewards system
 ├── test_custom_reward.py  # Test custom reward
 └── test_args.py          # Test argument parser
@@ -98,9 +98,14 @@ CARLA is an open-source simulator for autonomous driving research. It provides a
 
 ### Basic Training
 
-#### DQN Training
+#### Enhanced DQN Training
 ```bash
-python continuous_driver.py --algo dqn --town Town10HD_Opt --total-timesteps 10000 --train True --reward-type forced_movement --seed 42 --episode-length 300
+python continuous_driver.py --algo dqn_finaltest --town Town10HD_Opt --total-timesteps 15000 --train True --reward-type advanced --seed 22 --episode-length 200 --target-update-method soft --soft-update-tau 0.01 --driver-view --double-dqn --early-stop --early-stop-patience 40 --early-stop-tolerance 40 --learn-starts 2000 --learn-freq 8
+```
+
+#### Enhanced DQN Testing
+```bash
+python continuous_driver.py --algo dqn_finaltest --town Town10HD_Opt --total-timesteps 2000 --train False --reward-type advanced --seed 22 --episode-length 200 --driver-view --double-dqn
 ```
 
 #### PPO Training
@@ -117,7 +122,7 @@ python continuous_driver.py --algo ppo --reward-type custom --town Town10HD_Opt
 
 #### Using Advanced Reward Function
 ```bash
-python continuous_driver.py --algo dqn --reward-type advanced --town Town10HD_Opt
+python continuous_driver.py --algo dqn_finaltest --reward-type advanced --town Town10HD_Opt --double-dqn
 ```
 
 #### List Available Reward Functions
@@ -129,7 +134,7 @@ python continuous_driver.py --list-rewards
 
 #### Testing (Evaluation)
 ```bash
-python continuous_driver.py --algo dqn --town Town10HD_Opt --train False --test-timesteps 10000
+python continuous_driver.py --algo dqn_finaltest --town Town10HD_Opt --total-timesteps 2000 --train False --reward-type advanced --seed 22 --episode-length 200 --driver-view --double-dqn
 ```
 
 #### Environment Testing
@@ -145,13 +150,24 @@ python continuous_driver.py --test-env --town Town10HD_Opt
 ## 📋 Command Line Arguments
 
 ### Algorithm Parameters
-- `--algo`: Algorithm to use (`ppo` or `dqn`)
+- `--algo`: Algorithm to use (`ppo`, `dqn`, or `dqn_finaltest`)
 - `--learning-rate`: Learning rate of the optimizer
 - `--total-timesteps`: Total training timesteps
 - `--test-timesteps`: Number of timesteps for testing
 - `--episode-length`: Maximum episode length
 - `--action-std-init`: Initial exploration noise (PPO)
 - `--seed`: Random seed for reproducibility
+
+### Enhanced DQN Parameters
+- `--double-dqn`: Enable Double DQN for reduced overestimation bias
+- `--target-update-method`: Target network update method (`hard` or `soft`)
+- `--soft-update-tau`: Soft update coefficient for target network (e.g., 0.01)
+- `--early-stop`: Enable early stopping based on performance
+- `--early-stop-patience`: Episodes to wait before early stopping
+- `--early-stop-tolerance`: Reward improvement threshold for early stopping
+- `--learn-starts`: Timesteps before learning begins
+- `--learn-freq`: Frequency of learning updates
+- `--random-test`: Force random actions during testing (for baseline comparison)
 
 ### Environment Parameters
 - `--town`: CARLA town to use (default: Town10HD_Opt)
@@ -171,10 +187,10 @@ The `--driver-view` flag enables a real-time 3rd person camera view of the agent
 **Usage Examples:**
 ```bash
 # Training with driver view
-python continuous_driver.py --algo dqn --total-timesteps 10000 --driver-view
+python continuous_driver.py --algo dqn_finaltest --total-timesteps 15000 --driver-view --double-dqn
 
 # Testing with driver view
-python continuous_driver.py --algo dqn --train False --test-timesteps 1000 --driver-view
+python continuous_driver.py --algo dqn_finaltest --train False --total-timesteps 2000 --driver-view --double-dqn
 
 # Test the feature
 python test_driver_view.py
@@ -202,12 +218,16 @@ Basic speed-based rewards with collision penalties.
 - Handles episode timeouts
 - Detects when vehicle is stuck
 
-### AdvancedReward
-Multi-objective reward function with lane keeping and smooth driving.
-- All SimpleReward features
-- Lane keeping rewards
-- Speed limit compliance
-- Smooth driving rewards
+### AdvancedReward (Recommended)
+Sophisticated multi-objective reward function designed for highway driving scenarios.
+- **Dense reward shaping**: Continuous feedback for all driving behaviors
+- **Lane keeping system**: Dynamic rewards that scale over training with stability bonuses
+- **Speed optimization**: Encourages 8-12 m/s optimal speed range
+- **Anti-exploit measures**: Prevents circular driving and sustained steering
+- **Progressive penalties**: Collision penalties increase over training (annealed)
+- **Traffic compliance**: Off-road detection, wrong-way penalties
+- **Smooth driving incentives**: Rewards for gradual throttle/steering changes
+- **Early success termination**: Ends episodes early when driving well
 
 ### CustomReward
 Sophisticated reward function using CARLA sensor data and waypoints.
@@ -229,17 +249,24 @@ Sophisticated reward function using CARLA sensor data and waypoints.
   - Gamma: 0.99
   - Action Std: 0.2 → 0.05 (decay)
 
-### DQN (Deep Q-Network)
-- **Type**: Off-policy Q-learning algorithm
-- **Action Space**: Discrete (27 actions: 9 steer × 3 throttle)
-- **Features**: Experience replay, target networks, ε-greedy exploration
+### Enhanced DQN (Deep Q-Network)
+- **Type**: Off-policy Q-learning algorithm with advanced features
+- **Action Space**: Discrete (10 actions)
+- **Features**: 
+  - Double DQN for reduced overestimation bias
+  - Soft target network updates with configurable tau
+  - Early stopping with patience and tolerance thresholds
+  - Configurable learning start and frequency
+  - Experience replay and ε-greedy exploration
 - **Network**: Fully connected Q-network
 - **Hyperparameters**:
   - Learning Rate: 1e-3
   - Epsilon: 1.0 → 0.01 (decay: 0.995)
   - Buffer Size: 10,000
   - Batch Size: 32
-  - Target Update: Every 1000 steps
+  - Soft Update Tau: 0.01 (configurable)
+  - Learn Starts: 2000 timesteps
+  - Learn Frequency: Every 8 steps
 
 ## 🗺️ Available Towns
 
@@ -256,6 +283,7 @@ The following towns are available in CARLA 0.9.15:
 ### Checkpoints
 - **Location**: `checkpoints/{ALGO}/{TOWN}/`
 - **DQN**: `dqn_model_{number}.pth`
+- **DQN_FINALTEST**: `dqn_model_{number}.pth`
 - **PPO**: `ppo_policy_{number}.pth` + `checkpoint_ppo_{number}.pickle`
 
 ### TensorBoard Logs
